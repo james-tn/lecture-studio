@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&display=swap" rel="stylesheet">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/roughjs@4.6.6/bundled/rough.js"></script>
+<style>
+  :root { --ink:#1f2933; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; height:100%; background:#0f1115; color:#e6e6e6;
+              font-family: system-ui, sans-serif; }
+  .wrap { display:flex; flex-direction:column; align-items:center; gap:14px; padding:18px; }
+  .stage-outer { position:relative; width:min(96vw, 1280px); aspect-ratio:16/9;
+                 border-radius:14px; overflow:hidden; box-shadow:0 14px 40px rgba(0,0,0,.5); }
+  .stage { position:absolute; inset:0; }
+  .board-whiteboard { background:#fbfbf7;
+      background-image:radial-gradient(rgba(0,0,0,.035) 1px, transparent 1px);
+      background-size:26px 26px; }
+  #camera { position:absolute; inset:0; transition:transform .55s cubic-bezier(.4,0,.2,1); }
+  #mathLayer, #svgLayer { position:absolute; inset:0; width:100%; height:100%; }
+  #svgLayer { pointer-events:none; overflow:visible; }
+  .obj { position:absolute; transform:translate(-50%,-50%); color:var(--ink);
+         white-space:nowrap; transition:opacity .25s ease; }
+  .obj.text { font-family:'Caveat', cursive; font-weight:700; line-height:1; }
+  .obj table.wbtable { border-collapse:collapse; font-family:'KaTeX_Main','Times New Roman',serif; }
+  .wbtable th, .wbtable td { border:1.6px solid #aeb6bf; padding:5px 16px; text-align:center; }
+  .wbtable th { background:#16a085; color:#fff; border-color:#16a085; font-weight:600; }
+  .wbtable th .katex { color:#fff !important; }
+  .ink{--c:#1f2933;} .red{--c:#e23b3b;} .blue{--c:#2b6cb0;} .green{--c:#2f9e44;}
+  .orange{--c:#e8590c;} .purple{--c:#7048e8;} .yellow{--c:#caa800;}
+  .obj.colored, .obj.colored .katex { color:var(--c) !important; }
+  .controls { display:flex; gap:10px; align-items:center; }
+  button { background:#2b6cb0; color:#fff; border:0; padding:10px 18px; border-radius:8px;
+           font-size:15px; cursor:pointer; }
+  button:disabled { background:#444; cursor:default; }
+  .caption { min-height:28px; max-width:1000px; text-align:center; font-size:18px;
+             color:#cfd6df; }
+  .caption .w { transition: color .08s ease; }
+  .caption .w.on { color:#8fc0ff; font-weight:600; }
+  .rec .caption .w.on { color:#2b6cb0; }
+  .bar { width:min(96vw,1280px); height:6px; background:#252a33; border-radius:3px; overflow:hidden; }
+  .bar > div { height:100%; width:0; background:#2b6cb0; }
+  .meta { font-size:13px; color:#8b95a3; }
+  /* clean presentation mode for video capture */
+  .rec .controls, .rec .bar, .rec .meta { display:none; }
+  .rec .wrap { padding:0; gap:0; }
+  .rec .stage-outer { width:100vw; height:100vh; border-radius:0; box-shadow:none; }
+  .rec .caption { position:fixed; left:0; right:0; bottom:22px; z-index:5;
+                  font-family:'Caveat',cursive; font-weight:700; font-size:32px;
+                  color:#1f2933; text-shadow:0 1px 3px #fbfbf7, 0 0 6px #fbfbf7; }
+  #recmask{ position:fixed; inset:0; background:#000; z-index:99999; display:none; }
+  html.rec, html.rec body{ background:#000; }
+  html.rec #recmask{ display:block; }
+</style>
+</head>
+<body>
+<div id="recmask"></div>
+<div class="wrap">
+  <div class="meta" id="metaLine"></div>
+  <div class="stage-outer">
+    <div class="stage board-whiteboard" id="stage">
+      <div id="camera">
+        <div id="mathLayer"></div>
+        <svg id="svgLayer" viewBox="0 0 1280 720" preserveAspectRatio="none"></svg>
+      </div>
+    </div>
+  </div>
+  <div class="bar"><div id="prog"></div></div>
+  <div class="controls">
+    <button id="play" disabled>Loading…</button>
+    <button id="restart">Restart</button>
+  </div>
+  <div class="caption" id="caption"></div>
+</div>
+
+<script>
+const SCORE = __SCORE__;
+const MANIFEST = __MANIFEST__;
+const _params = new URLSearchParams(location.search);
+const AUTOPLAY = __AUTOPLAY__ || _params.has("autoplay");
+const RECORD = _params.has("record");   // deterministic timer-driven timeline for video capture
+if (RECORD) document.documentElement.classList.add("rec");
+const FLOW = _params.get("flow") || (SCORE.board && SCORE.board.flow) || "page";  // "page" | "scroll"
+const LAYOUT = _params.has("layout");   // replay instantly + record resolved geometry for Manim
+const _segP = _params.get("seg");
+const SEG = _segP ? _segP.split("-").map(Number) : null;  // [startBeat,endBeat) for parallel capture
+let INSTANT = false;   // true while pre-firing a segment's prior beats: final states, no animation
+let layoutOps = [], curPage = 0, curRef = "0.0";
+
+const W = 1280, H = 720, MARGIN = 40, PAGE_TOP = 64, CAP_RESERVE = 96;
+const COLORS = { ink:"#1f2933", red:"#e23b3b", blue:"#2b6cb0", green:"#2f9e44",
+                 orange:"#e8590c", purple:"#7048e8", yellow:"#f2c200" };
+const FONT = { sm:26, md:38, lg:52, xl:70 };
+const X = x => x/100*W, Y = y => y/100*H;
+
+// Graphs/charts are sized by the renderer from BOARD geometry, not from the model's pixel guesses
+// (which are unreliable — e.g. tiny in focused-section authoring). Width defaults to a readable
+// fraction of the usable board; an author-provided `w` is only a hint (clamped so a plot is never
+// tiny and never overflows, in any authoring mode). Height follows from width by a fixed aspect so
+// the plot box stays well-proportioned. Ratios (not pixels) are the design parameters, so this
+// stays correct if the board size changes.
+const PLOT = { wDef:0.36, wMin:0.30, wMax:0.70, aspect:0.8 };
+function plotBox(o){
+  const usableW = W - 2*MARGIN, usableH = H - PAGE_TOP - CAP_RESERVE;
+  const W0 = Math.round(Math.min(Math.max((o&&o.w) || usableW*PLOT.wDef, usableW*PLOT.wMin),
+                                 usableW*PLOT.wMax));
+  const H0 = Math.round(Math.min(W0*PLOT.aspect, usableH));
+  return { W0, H0 };
+}
+
+const mathLayer = document.getElementById("mathLayer");
+const svg = document.getElementById("svgLayer");
+const camera = document.getElementById("camera");
+const rc = rough.svg(svg);
+const reg = {};                 // id -> {el, cx, cy, w, h, partEls:{}}
+let audios = [], durations = [];
+let scrollY = 0;                // board-units scrolled (scroll mode)
+
+function setScroll(v, animate){
+  scrollY = Math.max(0, v);
+  camera.style.transition = animate===false ? "none" : "";
+  camera.style.transform = `translateY(${-(scrollY/H*100)}%)`;
+}
+function maybeScroll(cy, h){      // follow the write head in scroll mode
+  if (FLOW !== "scroll") return;
+  const bottom = cy + h/2;
+  if (bottom > scrollY + H - CAP_RESERVE) setScroll(bottom - H + CAP_RESERVE, !INSTANT);
+}
+function scrollDivider(){          // section break in scroll mode: divider + gap
+  let maxB = MARGIN;
+  for (const o of occupied) maxB = Math.max(maxB, o.y + o.h);
+  const y = maxB + 38;
+  const ln = rc.line(MARGIN, y, W-MARGIN, y, {stroke:"#c7c7c2", strokeWidth:1.5, roughness:.6});
+  ln.style.opacity = .8; svg.appendChild(ln);
+  occupy(W/2, y + 22, W - 2*MARGIN, 28);   // spacer so next content sits below the divider
+  maybeScroll(y + 36, 0);
+  if (LAYOUT) layoutOps.push({t:"divider", ref:curRef, y});
+}
+
+// ---- precompute, per object id, the parts that will be annotated, so we can
+// wrap those substrings in \cssId{...}{...} for reliable bbox lookup. ----
+const partsByObj = {};
+for (const b of SCORE.beats) for (const c of (b.cues||[])) {
+  if (c.part && c.target) (partsByObj[c.target] ||= new Set()).add(c.part);
+}
+// KaTeX \cssId chokes on underscores in the id, so keep it strictly alphanumeric.
+const partKey = (id,p) => "pid" + (id+p).replace(/[^a-zA-Z0-9]/g,"");
+
+function texWithParts(id, tex) {
+  let out = tex;
+  for (const p of (partsByObj[id] || [])) {
+    const i = out.indexOf(p);
+    // Brace-wrap so the marker is a valid group even right after ^ or _ (e.g. 2^{...}).
+    if (i >= 0) out = out.slice(0,i) + `{\\htmlId{${partKey(id,p)}}{${p}}}` + out.slice(i+p.length);
+  }
+  return out;
+}
+
+function stageRect(){ return document.getElementById("stage").getBoundingClientRect(); }
+function pxToBoard(r){ // client rect -> board (1280x720) world coords (adds scroll offset to y)
+  const s = stageRect();
+  return { x:(r.left-s.left)/s.width*W, y:(r.top-s.top)/s.height*H + scrollY,
+           w:r.width/s.width*W, h:r.height/s.height*H };
+}
+function bboxOf(id, part){
+  const o = reg[id]; if(!o) return null;
+  // Whole-object box from STORED board coords — independent of scroll position or any in-flight
+  // scroll transition (getBoundingClientRect would race the camera and mis-place annotations).
+  const whole = { x:o.cx - o.w/2, y:o.cy - o.h/2, w:o.w, h:o.h };
+  if (!part) return whole;
+  const el = o.partEls[part] || findPartEl(o.el, part);
+  if (!el) return whole;
+  // Position the part RELATIVE to its parent: part/parent client rects are measured together, so
+  // their difference is transition-safe. Anchor it to the parent's true board center.
+  const s = stageRect();
+  const sx = W / s.width, sy = H / s.height;
+  const pr = o.el.getBoundingClientRect(), er = el.getBoundingClientRect();
+  const bx = o.cx + ((er.left + er.width/2) - (pr.left + pr.width/2)) * sx;
+  const by = o.cy + ((er.top + er.height/2) - (pr.top + pr.height/2)) * sy;
+  return { x: bx - er.width*sx/2, y: by - er.height*sy/2, w: er.width*sx, h: er.height*sy };
+}
+// Resolve a `part` to a descendant element (a table cell, label, span...) so annotations
+// like circle/box/highlight can target one piece of a non-math object instead of the whole.
+function elText(e){
+  const kh = e.querySelector && e.querySelector(".katex-html");   // KaTeX duplicates text in MathML; read the visible part only
+  return ((kh ? kh.textContent : e.textContent) || "").replace(/\s+/g," ").trim();
+}
+function findPartEl(root, part){
+  if(!root || !root.querySelectorAll) return null;
+  const want = String(part).replace(/\s+/g," ").trim();
+  if(!want) return null;
+  for (const e of root.querySelectorAll("[data-part]"))            // explicit tags (table cells)
+    if ((e.getAttribute("data-part")||"").replace(/\s+/g," ").trim() === want) return e;
+  let best=null, bestW=Infinity;                                   // else smallest element whose text matches exactly
+  for (const e of root.querySelectorAll("td,th,tspan,text,span,div,li,p")){
+    if (elText(e) === want){ const w=e.getBoundingClientRect().width; if(w<bestW){best=e;bestW=w;} }
+  }
+  return best;
+}
+
+// ---------- collision avoidance ----------
+let occupied = [];   // board-space rects of placed content (objects + standalone marks)
+function occupy(cx, cy, w, h){ occupied.push({x:cx-w/2, y:cy-h/2, w, h}); }
+function rectsOverlap(a, b, m){
+  return !(a.x+a.w+m < b.x || b.x+b.w+m < a.x || a.y+a.h+m < b.y || b.y+b.h+m < a.y);
+}
+function avoidCollisions(cx, cy, w, h){
+  const m = 12; let tries = 0;
+  while(tries++ < 40){
+    const r = {x:cx-w/2, y:cy-h/2, w, h};
+    const hit = occupied.find(o => rectsOverlap(r, o, m));
+    if(!hit) break;
+    cy = hit.y + hit.h + m + h/2 + 4;            // drop below the obstacle
+    if(FLOW==="page" && cy + h/2 > H - MARGIN) break;   // off the bottom -> let makeObject paginate
+  }
+  return [cx, cy];
+}
+
+// ---------- pagination ----------
+function newPage(keepIds){
+  keepIds = keepIds || [];
+  // fade + remove annotations
+  const oldNodes = Array.from(svg.children);
+  oldNodes.forEach(n => { try{ n.animate([{opacity:1},{opacity:0}],{duration:340,fill:"forwards"}); }catch(e){} });
+  setTimeout(() => oldNodes.forEach(n => n.remove()), 360);
+  // separate kept vs wiped objects
+  const kept = [];
+  for(const id of Object.keys(reg)){
+    if(keepIds.includes(id)){ kept.push([id, reg[id]]); }
+    else { const el = reg[id].el; el.animate([{opacity:1},{opacity:0}],{duration:340,fill:"forwards"});
+           setTimeout(() => el.remove(), 360); delete reg[id]; }
+  }
+  occupied = [];
+  curPage++;
+  // restack kept objects at the top of the fresh page
+  let y = PAGE_TOP;
+  const keptRecord = [];
+  for(const [id, o] of kept){
+    const nx = Math.min(Math.max(o.cx, MARGIN+o.w/2), W-MARGIN-o.w/2);
+    const ny = y + o.h/2;
+    o.el.animate([{left:o.el.style.left, top:o.el.style.top},
+                  {left:nx/W*100+"%", top:ny/H*100+"%"}],
+                 {duration:420, fill:"forwards", easing:"ease-in-out"});
+    o.cx = nx; o.cy = ny; o.el.style.left = nx/W*100+"%"; o.el.style.top = ny/H*100+"%";
+    occupy(nx, ny, o.w, o.h);
+    redrawAnns(id);                         // carry this object's annotations to the new page
+    keptRecord.push({ref:o.ref, x:nx, y:ny});
+    y = ny + o.h/2 + 26;
+  }
+  if (LAYOUT) layoutOps.push({t:"page", ref:curRef, page:curPage, keep:keptRecord});
+}
+
+// ---------- object creation ----------
+function placeCenter(cue){
+  if (cue.pos) return [X(cue.pos.x), Y(cue.pos.y), false];
+  if (cue.below && reg[cue.below]){ const t=reg[cue.below]; return [t.cx, t.cy + t.h/2, "below"]; }
+  if (cue.right_of && reg[cue.right_of]){ const t=reg[cue.right_of]; return [t.cx + t.w/2, t.cy, "right"]; }
+  return [X(50), Y(50), false];
+}
+
+function makeObject(cue, dur){
+  const o = cue.object || {};
+  const el = document.createElement("div");
+  el.className = "obj " + (o.type==="text"?"text ":"") ;
+  const col = (cue.style&&cue.style.color) || "ink";
+  if (col!=="ink"){ el.classList.add("colored", col); el.style.setProperty("--c", COLORS[col]); }
+  const size = FONT[(cue.style&&cue.style.size)||"md"];
+  el.style.fontSize = size+"px";
+  mathLayer.appendChild(el);
+
+  let gdesc=null;
+  if (o.type==="math"){
+    katex.render(texWithParts(cue.id, o.tex||""), el,
+      {throwOnError:false, trust:true, strict:false, displayMode:false});
+  } else if (o.type==="text"){
+    el.textContent = o.text||"";
+    el.style.fontSize = (size*1.15)+"px";
+  } else if (o.type==="plot" || o.type==="graph"){
+    gdesc = renderGraph(el, o, col);
+  } else if (o.type==="table"){
+    renderTable(el, o);
+  } else if (o.type==="figure"){
+    renderFigure(el, o);
+  } else if (o.type==="diagram"){
+    renderDiagram(el, o);
+  } else if (o.type==="chart"){
+    renderChart(el, o);
+  } else if (o.type==="image"){
+    renderImage(el, o);
+  }
+
+  // auto-fit: shrink anything larger than the usable board area (leave room for the caption)
+  const maxW = W - 2*MARGIN, maxH = H - PAGE_TOP - CAP_RESERVE;
+  let r = pxToBoard(el.getBoundingClientRect());
+  const fit = Math.min(1, maxW / r.w, maxH / r.h);
+  if (fit < 1){
+    el.style.fontSize = (parseFloat(el.style.fontSize) * fit) + "px";
+    r = pxToBoard(el.getBoundingClientRect());
+  }
+  // measure, then position center
+  let [cx, cy, rel] = placeCenter(cue);
+  const GAP = 30;
+  if (rel==="below") cy += r.h/2 + GAP;
+  if (rel==="right") cx += r.w/2 + GAP;
+  // Scroll mode: pos.y is an ABSOLUTE board coordinate, which in a long lecture sends content
+  // back up into earlier material. Flow absolutely-placed objects to the current content bottom.
+  if (FLOW === "scroll" && rel === false){
+    let bottom = PAGE_TOP;
+    for (const o of occupied) bottom = Math.max(bottom, o.y + o.h);
+    if (cy - r.h/2 < bottom - 4) cy = bottom + GAP + r.h/2;
+  }
+  // clamp on-board (x) FIRST, then resolve collisions by dropping below — so a `right_of`
+  // placement that overflows the right edge wraps under its anchor instead of overlapping it.
+  cx = Math.min(Math.max(cx, MARGIN + r.w/2), W - MARGIN - r.w/2);
+  [cx, cy] = avoidCollisions(cx, cy, r.w, r.h);
+  if (FLOW === "page"){
+    // page break if this would overflow the bottom -> wipe and place at top of a fresh page
+    if (cy + r.h/2 > H - MARGIN){
+      newPage([]);
+      cx = Math.min(Math.max(X((cue.pos&&cue.pos.x)||50), MARGIN + r.w/2), W - MARGIN - r.w/2);
+      cy = PAGE_TOP + r.h/2;
+      [cx, cy] = avoidCollisions(cx, cy, r.w, r.h);
+    }
+    cy = Math.min(Math.max(cy, MARGIN + r.h/2), H - MARGIN - r.h/2);
+  } else {
+    // scroll: content may extend below the frame; the camera follows it
+    cy = Math.max(cy, MARGIN + r.h/2);
+  }
+  el.style.left = (cx/W*100)+"%"; el.style.top = (cy/H*100)+"%";
+  const r2 = pxToBoard(el.getBoundingClientRect());
+  const entry = { el, cx, cy, w:r2.w, h:r2.h, partEls:{}, ref:curRef };
+  for (const p of (partsByObj[cue.id]||[])){
+    const pe = document.getElementById(partKey(cue.id,p)); if(pe) entry.partEls[p]=pe;
+  }
+  reg[cue.id] = entry;
+  if(gdesc) entry.graph = gdesc;
+  occupy(cx, cy, r2.w, r2.h);
+  maybeScroll(cy, r2.h);
+  if (LAYOUT) layoutOps.push({t:"place", ref:curRef, x:cx, y:cy, w:r2.w, h:r2.h,
+                              page:curPage, scroll:scrollY});
+
+  // write-on reveal
+  if(!INSTANT) el.animate([{clipPath:"inset(0 100% 0 0)",opacity:.25},{clipPath:"inset(0 0 0 0)",opacity:1}],
+             {duration:dur, easing:"ease-out", fill:"backwards"});
+  return entry;
+}
+
+function gfn(expr){
+  try{ return new Function("x","with(Math){return ("+String(expr).replace(/\^/g,"**")+")}"); }
+  catch(e){ return ()=>NaN; }
+}
+// Realistic coordinate graph: grid, arrowed+labelled axes, numbered ticks, curves, points.
+// Returns a descriptor {sx, sy, svg} so later `point` cues can plot into the same plane.
+function renderGraph(el, o, col){
+  const ns="http://www.w3.org/2000/svg";
+  const {W0, H0} = plotBox(o), PAD=16;
+  const fns = o.fns || (o.fn ? [{expr:o.fn, color:col}] : []);
+  let [xmin,xmax] = o.xrange || o.domain || [-5,5];
+  let [ymin,ymax] = o.yrange || (function(){
+    let ys=[]; for(const f of fns){ const fn=gfn(f.expr);
+      for(let i=0;i<=160;i++){ const x=xmin+(xmax-xmin)*i/160; const y=fn(x); if(isFinite(y))ys.push(y);} }
+    (o.points||[]).forEach(p=>ys.push(p.y));
+    if(!ys.length) return [-5,5];
+    let lo=Math.min(...ys), hi=Math.max(...ys), pad=(hi-lo)*0.12||1; return [Math.floor(lo-pad),Math.ceil(hi+pad)];
+  })();
+  const s=document.createElementNS(ns,"svg"); s.setAttribute("width",W0); s.setAttribute("height",H0);
+  const iw=W0-2*PAD, ih=H0-2*PAD;
+  const sx=x=>PAD+(x-xmin)/(xmax-xmin)*iw, sy=y=>PAD+ih-(y-ymin)/(ymax-ymin)*ih;
+  const mk=(tag,attrs)=>{ const n=document.createElementNS(ns,tag); for(const k in attrs) n.setAttribute(k,attrs[k]); return n; };
+  // step so we show ~5-9 ticks
+  const step=(r)=>{ const raw=r/7; const p=Math.pow(10,Math.floor(Math.log10(raw))); const m=raw/p;
+                    return (m<1.5?1:m<3?2:m<7?5:10)*p; };
+  const xs=step(xmax-xmin), yst=step(ymax-ymin);
+  // grid
+  if(o.grid!==false){
+    for(let x=Math.ceil(xmin/xs)*xs; x<=xmax+1e-9; x+=xs) s.appendChild(mk("line",{x1:sx(x),y1:PAD,x2:sx(x),y2:PAD+ih,stroke:"#e2e7ee","stroke-width":1}));
+    for(let y=Math.ceil(ymin/yst)*yst; y<=ymax+1e-9; y+=yst) s.appendChild(mk("line",{x1:PAD,y1:sy(y),x2:PAD+iw,y2:sy(y),stroke:"#e2e7ee","stroke-width":1}));
+  }
+  const x0=sx(0), y0=sy(0), AX="#5b6470";
+  // axes with arrowheads
+  const arrow=(x1,y1,x2,y2)=>{ s.appendChild(mk("line",{x1,y1,x2,y2,stroke:AX,"stroke-width":1.6}));
+    const a=Math.atan2(y2-y1,x2-x1),hl=8;
+    s.appendChild(mk("line",{x1:x2,y1:y2,x2:x2-hl*Math.cos(a-0.4),y2:y2-hl*Math.sin(a-0.4),stroke:AX,"stroke-width":1.6}));
+    s.appendChild(mk("line",{x1:x2,y1:y2,x2:x2-hl*Math.cos(a+0.4),y2:y2-hl*Math.sin(a+0.4),stroke:AX,"stroke-width":1.6})); };
+  if(ymin<=0&&ymax>=0) arrow(PAD,y0,PAD+iw,y0);
+  if(xmin<=0&&xmax>=0) arrow(x0,PAD+ih,x0,PAD);
+  // ticks + numbers
+  const txt=(x,y,t,anchor)=>{ const n=mk("text",{x,y,"font-size":12,fill:"#5b6470","text-anchor":anchor||"middle","font-family":"system-ui"}); n.textContent=t; s.appendChild(n); };
+  for(let x=Math.ceil(xmin/xs)*xs; x<=xmax+1e-9; x+=xs){ if(Math.abs(x)<1e-9)continue;
+    s.appendChild(mk("line",{x1:sx(x),y1:y0-4,x2:sx(x),y2:y0+4,stroke:AX,"stroke-width":1.4})); txt(sx(x),y0+16,(Math.round(x*100)/100)); }
+  for(let y=Math.ceil(ymin/yst)*yst; y<=ymax+1e-9; y+=yst){ if(Math.abs(y)<1e-9)continue;
+    s.appendChild(mk("line",{x1:x0-4,y1:sy(y),x2:x0+4,y2:sy(y),stroke:AX,"stroke-width":1.4})); txt(x0-8,sy(y)+4,(Math.round(y*100)/100),"end"); }
+  // labels O, x, y
+  txt(x0-9,y0+15,"O","end");
+  txt(PAD+iw-2,y0-8,o.xlabel||"x","end"); txt(x0+12,PAD+10,o.ylabel||"y","start");
+  // colored text helper (for reference-line labels)
+  const ctxt=(x,y,t,anchor,fill)=>{ const n=mk("text",{x,y,"font-size":12,fill:fill||"#5b6470","text-anchor":anchor||"middle","font-family":"system-ui"}); n.textContent=t; s.appendChild(n); };
+  // dashed reference lines (asymptotes / markers, e.g. Vmax, 1/2 Vmax, KM)
+  for(const L of (o.hlines||[])){ if(L.y<ymin||L.y>ymax) continue; const c=COLORS[L.color]||AX, yy=sy(L.y);
+    s.appendChild(mk("line",{x1:PAD,y1:yy,x2:PAD+iw,y2:yy,stroke:c,"stroke-width":1.6,"stroke-dasharray":L.dashed===false?"":"5 4"}));
+    if(L.label) ctxt(PAD+4,yy-5,L.label,"start",c); }
+  for(const L of (o.vlines||[])){ if(L.x<xmin||L.x>xmax) continue; const c=COLORS[L.color]||AX, xx=sx(L.x);
+    s.appendChild(mk("line",{x1:xx,y1:PAD,x2:xx,y2:PAD+ih,stroke:c,"stroke-width":1.6,"stroke-dasharray":L.dashed===false?"":"5 4"}));
+    if(L.label) ctxt(xx,PAD+ih+16,L.label,"middle",c); }
+  // curves
+  for(const f of fns){ const fn=gfn(f.expr); let d="",pen=false;
+    for(let i=0;i<=300;i++){ const x=xmin+(xmax-xmin)*i/300; const y=fn(x);
+      if(!isFinite(y)||y<ymin-2||y>ymax+2){ pen=false; continue; }
+      d+=(pen?" L":" M")+sx(x).toFixed(1)+" "+sy(y).toFixed(1); pen=true; }
+    s.appendChild(mk("path",{d,stroke:COLORS[f.color]||COLORS[col]||COLORS.red,"stroke-width":2.6,fill:"none","stroke-linecap":"round"})); }
+  // connect data points with line segments (a data series)
+  if(o.connect && (o.points||[]).length>1){
+    let d=""; o.points.forEach((p,i)=>{ d+=(i?" L":"M")+sx(p.x)+" "+sy(p.y); });
+    s.appendChild(mk("path",{d,stroke:COLORS[o.lineColor]||COLORS.orange,"stroke-width":2.6,fill:"none"})); }
+  // points
+  for(const p of (o.points||[])){
+    if(p.x<xmin||p.x>xmax||p.y<ymin||p.y>ymax) continue;
+    s.appendChild(mk("circle",{cx:sx(p.x),cy:sy(p.y),r:4,fill:COLORS[p.color]||COLORS.red}));
+    if(p.label) txt(sx(p.x)+7,sy(p.y)-6,p.label,"start");
+  }
+  el.appendChild(s);
+  return {sx, sy, svg:s, xmin, xmax, ymin, ymax};
+}
+// add a dot (live) to an existing graph at data coords
+function plotPoint(graph, gx, gy, color, label){
+  if(!graph) return; const ns="http://www.w3.org/2000/svg";
+  const c=document.createElementNS(ns,"circle");
+  c.setAttribute("cx",graph.sx(gx)); c.setAttribute("cy",graph.sy(gy)); c.setAttribute("r",5);
+  c.setAttribute("fill",COLORS[color]||COLORS.red); graph.svg.appendChild(c);
+  c.animate([{opacity:0,transform:"scale(0)"},{opacity:1,transform:"scale(1)"}],
+            {duration:280,fill:"backwards",easing:"ease-out"});
+  if(label){ const t=document.createElementNS(ns,"text"); t.setAttribute("x",graph.sx(gx)+7);
+    t.setAttribute("y",graph.sy(gy)-6); t.setAttribute("font-size",12); t.setAttribute("fill",COLORS[color]||COLORS.red);
+    t.textContent=label; graph.svg.appendChild(t); }
+}
+// realistic bordered table (header row + cells); cells rendered with KaTeX so math looks right
+function renderTable(el, o){
+  const t=document.createElement("table"); t.className="wbtable";
+  const cell=(content, isHeader)=>{ const c=document.createElement(isHeader?"th":"td");
+    const raw=String(content==null?"":content);
+    c.setAttribute("data-part", raw);
+    try{ katex.render(raw, c, {throwOnError:false, strict:false, displayMode:false}); }
+    catch(e){ c.textContent=raw; } return c; };
+  if(o.headers && o.headers.length){ const tr=document.createElement("tr");
+    o.headers.forEach(h=>tr.appendChild(cell(h,true))); t.appendChild(tr); }
+  (o.rows||[]).forEach(row=>{ const tr=document.createElement("tr");
+    (row||[]).forEach(c=>tr.appendChild(cell(c,false))); t.appendChild(tr); });
+  el.appendChild(t);
+}
+
+// geometry figure: points, segments, polygons, circles, arcs, angles, labels — hand-drawn (Rough.js)
+function renderFigure(el, o){
+  const ns="http://www.w3.org/2000/svg";
+  const W0=o.w||380, H0=o.h||330, PAD=26;
+  const els=o.elements||[];
+  // collect coords to auto-fit (uniform scale, undistorted)
+  const cs=[]; const add=p=>{ if(Array.isArray(p)&&p.length>=2) cs.push(p); };
+  for(const e of els){ add(e.at); add(e.from); add(e.to); add(e.center); (e.points||[]).forEach(add);
+    if(e.center && typeof e.r==="number"){ cs.push([e.center[0]-e.r,e.center[1]-e.r]); cs.push([e.center[0]+e.r,e.center[1]+e.r]); } }
+  let [xmin,xmax]=o.xrange||[Math.min(...cs.map(c=>c[0])), Math.max(...cs.map(c=>c[0]))];
+  let [ymin,ymax]=o.yrange||[Math.min(...cs.map(c=>c[1])), Math.max(...cs.map(c=>c[1]))];
+  if(!isFinite(xmin)){ xmin=-1;xmax=1;ymin=-1;ymax=1; }
+  if(xmax-xmin<1e-6){xmax+=1;xmin-=1;} if(ymax-ymin<1e-6){ymax+=1;ymin-=1;}
+  const iw=W0-2*PAD, ih=H0-2*PAD, sc=Math.min(iw/(xmax-xmin), ih/(ymax-ymin));
+  const ox=PAD+(iw-sc*(xmax-xmin))/2, oy=PAD+(ih+sc*(ymax-ymin))/2;
+  const sx=x=>ox+(x-xmin)*sc, sy=y=>oy-(y-ymin)*sc;
+  const s=document.createElementNS(ns,"svg"); s.setAttribute("width",W0); s.setAttribute("height",H0);
+  const rcF=rough.svg(s);
+  const col=e=>COLORS[e.color]||COLORS.ink;
+  const txt=(x,y,t,c)=>{ const n=document.createElementNS(ns,"text"); n.setAttribute("x",x); n.setAttribute("y",y);
+    n.setAttribute("font-size",15); n.setAttribute("font-family","KaTeX_Math, serif"); n.setAttribute("font-style","italic");
+    n.setAttribute("fill",c||COLORS.ink); n.textContent=t; s.appendChild(n); };
+  if(o.grid){ for(let x=Math.ceil(xmin);x<=xmax;x++) s.appendChild(mkLine(ns,sx(x),PAD,sx(x),H0-PAD,"#e6eaef",1));
+    for(let y=Math.ceil(ymin);y<=ymax;y++) s.appendChild(mkLine(ns,PAD,sy(y),W0-PAD,sy(y),"#e6eaef",1)); }
+  for(const e of els){
+    const c=col(e), sw=2.2, ro=1.3;
+    if(e.kind==="point"){ s.appendChild(rcF.circle(sx(e.at[0]),sy(e.at[1]),7,{fill:c,fillStyle:"solid",stroke:c}));
+      if(e.label) txt(sx(e.at[0])+8, sy(e.at[1])-7, e.label, c); }
+    else if(e.kind==="segment"||e.kind==="line"||e.kind==="ray"){
+      const p0=[sx(e.from[0]),sy(e.from[1])], p1=[sx(e.to[0]),sy(e.to[1])];
+      s.appendChild(rcF.line(p0[0],p0[1],p1[0],p1[1],{stroke:c,strokeWidth:sw,roughness:ro}));
+      if(e.ticks){ const mx=(p0[0]+p1[0])/2,my=(p0[1]+p1[1])/2, a=Math.atan2(p1[1]-p0[1],p1[0]-p0[0]);
+        const nx=Math.cos(a+Math.PI/2),ny=Math.sin(a+Math.PI/2);
+        for(let k=0;k<e.ticks;k++){ const off=(k-(e.ticks-1)/2)*5;
+          const cxk=mx+Math.cos(a)*off, cyk=my+Math.sin(a)*off;
+          s.appendChild(mkLine(ns,cxk-nx*6,cyk-ny*6,cxk+nx*6,cyk+ny*6,c,sw)); } }
+      if(e.label){ const mx=(p0[0]+p1[0])/2,my=(p0[1]+p1[1])/2, a=Math.atan2(p1[1]-p0[1],p1[0]-p0[0]);
+        txt(mx+Math.cos(a+Math.PI/2)*14, my+Math.sin(a+Math.PI/2)*14+5, e.label, c); } }
+    else if(e.kind==="polygon"){
+      const pts=e.points.map(p=>[sx(p[0]),sy(p[1])]);
+      const opt={stroke:c,strokeWidth:sw,roughness:ro}; if(e.fill){opt.fill=c;opt.fillStyle="hachure";opt.fillWeight=1;}
+      s.appendChild(rcF.polygon(pts,opt)); }
+    else if(e.kind==="circle"){ s.appendChild(rcF.circle(sx(e.center[0]),sy(e.center[1]),2*e.r*sc,{stroke:c,strokeWidth:sw,roughness:ro})); }
+    else if(e.kind==="arc"){ const cx=sx(e.center[0]),cy=sy(e.center[1]),R=e.r*sc;
+      const a0=-(e.start||0)*Math.PI/180, a1=-(e.end||90)*Math.PI/180;
+      const d=`M ${cx+R*Math.cos(a0)} ${cy+R*Math.sin(a0)} A ${R} ${R} 0 0 ${a1<a0?1:0} ${cx+R*Math.cos(a1)} ${cy+R*Math.sin(a1)}`;
+      s.appendChild(rcF.path(d,{stroke:c,strokeWidth:sw,roughness:ro})); }
+    else if(e.kind==="angle"){ drawAngle(s,rcF,sx,sy,e,c,ns,txt); }
+    else if(e.kind==="label"){ txt(sx(e.at[0]),sy(e.at[1]), e.text||"", c); }
+  }
+  el.appendChild(s);
+}
+function mkLine(ns,x1,y1,x2,y2,stroke,w){ const n=document.createElementNS(ns,"line");
+  n.setAttribute("x1",x1);n.setAttribute("y1",y1);n.setAttribute("x2",x2);n.setAttribute("y2",y2);
+  n.setAttribute("stroke",stroke);n.setAttribute("stroke-width",w); return n; }
+function drawAngle(s,rcF,sx,sy,e,c,ns,txt){
+  const V=[sx(e.at[0]),sy(e.at[1])], A=[sx(e.from[0]),sy(e.from[1])], B=[sx(e.to[0]),sy(e.to[1])];
+  const a1=Math.atan2(A[1]-V[1],A[0]-V[0]), a2=Math.atan2(B[1]-V[1],B[0]-V[0]);
+  if(e.mark==="right"){ const r=16, u1=[Math.cos(a1),Math.sin(a1)], u2=[Math.cos(a2),Math.sin(a2)];
+    const p1=[V[0]+u1[0]*r,V[1]+u1[1]*r], p2=[V[0]+(u1[0]+u2[0])*r,V[1]+(u1[1]+u2[1])*r], p3=[V[0]+u2[0]*r,V[1]+u2[1]*r];
+    s.appendChild(rcF.linearPath([p1,p2,p3],{stroke:c,strokeWidth:2,roughness:.6})); }
+  else { const R=22; let d=a2-a1; while(d<=-Math.PI)d+=2*Math.PI; while(d>Math.PI)d-=2*Math.PI;
+    const sweep=d>0?1:0;
+    const dd=`M ${V[0]+R*Math.cos(a1)} ${V[1]+R*Math.sin(a1)} A ${R} ${R} 0 0 ${sweep} ${V[0]+R*Math.cos(a2)} ${V[1]+R*Math.sin(a2)}`;
+    s.appendChild(rcF.path(dd,{stroke:c,strokeWidth:2,roughness:.8}));
+    if(e.label){ const am=a1+d/2; txt(V[0]+34*Math.cos(am)-6, V[1]+34*Math.sin(am)+5, e.label, c); } }
+}
+
+// node-and-edge diagram (flows, cycles): great for biology cycles, processes, food webs
+function renderDiagram(el, o){
+  const ns="http://www.w3.org/2000/svg";
+  const W0=o.w||460, H0=o.h||360, PAD=30;
+  const nodes=(o.nodes||[]).map(n=>Object.assign({},n));
+  const N=nodes.length;
+  // positions: explicit `at` (0..100 local) or auto-layout
+  nodes.forEach((n,i)=>{ if(!n.at){
+    if(o.layout==="cycle"||!o.layout){ const a=-Math.PI/2 + i*2*Math.PI/Math.max(1,N);
+      n.at=[50+38*Math.cos(a), 50+38*Math.sin(a)]; }
+    else n.at=[50,(i+0.5)/N*100]; } });
+  const sx=x=>PAD+x/100*(W0-2*PAD), sy=y=>PAD+y/100*(H0-2*PAD);
+  const s=document.createElementNS(ns,"svg"); s.setAttribute("width",W0); s.setAttribute("height",H0);
+  const rcD=rough.svg(s); const byId={}; nodes.forEach(n=>byId[n.id]=n);
+  const box=n=>{ const w=Math.max(54, (String(n.text||"").length)*8.4+22), h=34; return {w,h,cx:sx(n.at[0]),cy:sy(n.at[1])}; };
+  // edges first (under nodes)
+  for(const e of (o.edges||[])){ const a=byId[e.from], b=byId[e.to]; if(!a||!b) continue;
+    const ba=box(a), bb=box(b); let p0=[ba.cx,ba.cy], p1=[bb.cx,bb.cy];
+    const ang=Math.atan2(p1[1]-p0[1],p1[0]-p0[0]);
+    p0=[p0[0]+Math.cos(ang)*ba.w/2, p0[1]+Math.sin(ang)*ba.h/2];
+    p1=[p1[0]-Math.cos(ang)*bb.w/2, p1[1]-Math.sin(ang)*bb.h/2];
+    const col=COLORS[e.color]||COLORS.ink;
+    s.appendChild(rcD.line(p0[0],p0[1],p1[0],p1[1],{stroke:col,strokeWidth:2,roughness:1}));
+    if(e.arrow!==false){ const hl=10;
+      s.appendChild(rcD.line(p1[0],p1[1],p1[0]-hl*Math.cos(ang-0.4),p1[1]-hl*Math.sin(ang-0.4),{stroke:col,strokeWidth:2}));
+      s.appendChild(rcD.line(p1[0],p1[1],p1[0]-hl*Math.cos(ang+0.4),p1[1]-hl*Math.sin(ang+0.4),{stroke:col,strokeWidth:2})); }
+    if(e.label){ const t=document.createElementNS(ns,"text"); t.setAttribute("x",(p0[0]+p1[0])/2);
+      t.setAttribute("y",(p0[1]+p1[1])/2-4); t.setAttribute("font-size",12); t.setAttribute("text-anchor","middle");
+      t.setAttribute("fill",col); t.textContent=e.label; s.appendChild(t); } }
+  // nodes on top
+  for(const n of nodes){ const b=box(n), col=COLORS[n.color]||COLORS.blue;
+    const shape=n.shape==="ellipse"||n.shape==="circle"
+      ? rcD.ellipse(b.cx,b.cy,b.w,b.h+6,{stroke:col,strokeWidth:2,roughness:1,fill:"#fff",fillStyle:"solid"})
+      : rcD.rectangle(b.cx-b.w/2,b.cy-b.h/2,b.w,b.h,{stroke:col,strokeWidth:2,roughness:1,fill:"#fff",fillStyle:"solid"});
+    s.appendChild(shape);
+    const t=document.createElementNS(ns,"text"); t.setAttribute("x",b.cx); t.setAttribute("y",b.cy+4);
+    t.setAttribute("font-size",13); t.setAttribute("text-anchor","middle"); t.setAttribute("fill",COLORS.ink);
+    t.setAttribute("font-family","system-ui"); t.textContent=n.text||n.id; s.appendChild(t); }
+  el.appendChild(s);
+}
+// base image (generated asset or provided URL) the lecture annotates over
+function renderImage(el, o){
+  const w=o.w||420, h=o.h||320;
+  if(o.src){ const img=document.createElement("img"); img.src=o.src; img.style.width=w+"px";
+    img.style.height=(o.h?h+"px":"auto"); img.style.display="block"; img.style.borderRadius="6px"; el.appendChild(img); }
+  else { const d=document.createElement("div"); d.style.cssText=`width:${w}px;height:${h}px;border:2px dashed #b8c0c8;`+
+      `border-radius:6px;display:flex;align-items:center;justify-content:center;color:#8b95a3;font-size:13px;text-align:center;padding:12px`;
+    d.textContent=o.alt||o.prompt||"[image]"; el.appendChild(d); }
+}
+// shared science chart: bar / grouped bar / pie (categorical data — common to all sciences)
+function renderChart(el, o){
+  const ns="http://www.w3.org/2000/svg";
+  const {W0, H0} = plotBox(o);
+  const s=document.createElementNS(ns,"svg"); s.setAttribute("width",W0); s.setAttribute("height",H0);
+  const mk=(tag,a)=>{ const n=document.createElementNS(ns,tag); for(const k in a) n.setAttribute(k,a[k]); return n; };
+  const txt=(x,y,t,anc,fill,sz)=>{ const n=mk("text",{x,y,"font-size":sz||12,fill:fill||"#1f2933","text-anchor":anc||"middle","font-family":"system-ui"}); n.textContent=t; s.appendChild(n); };
+  const PAL=["#2b6cb0","#2f9e44","#e8590c","#7048e8","#e23b3b","#16a085","#caa800"];
+  if(o.title) txt(W0/2,18,o.title,"middle","#1f2933",14);
+  const top=o.title?30:14;
+  if((o.kind||"bar")==="pie"){
+    const sl=o.slices||[]; const tot=sl.reduce((a,b)=>a+(b.value||0),0)||1;
+    const cx=W0*0.36, cy=(H0+top)/2, R=Math.min(W0*0.32,(H0-top)/2-10); let ang=-Math.PI/2;
+    sl.forEach((sg,i)=>{ const a2=ang+(sg.value/tot)*2*Math.PI; const c=COLORS[sg.color]||PAL[i%PAL.length];
+      const x1=cx+R*Math.cos(ang),y1=cy+R*Math.sin(ang),x2=cx+R*Math.cos(a2),y2=cy+R*Math.sin(a2);
+      const large=(a2-ang)>Math.PI?1:0;
+      s.appendChild(mk("path",{d:`M${cx} ${cy} L${x1} ${y1} A${R} ${R} 0 ${large} 1 ${x2} ${y2} Z`,fill:c,stroke:"#fff","stroke-width":2}));
+      const am=(ang+a2)/2; txt(cx+R*0.62*Math.cos(am),cy+R*0.62*Math.sin(am)+4,Math.round(sg.value/tot*100)+"%","middle","#fff",12);
+      ang=a2; });
+    // legend
+    let ly=top+10; sl.forEach((sg,i)=>{ const c=COLORS[sg.color]||PAL[i%PAL.length];
+      s.appendChild(mk("rect",{x:W0*0.72,y:ly-10,width:12,height:12,fill:c,rx:2}));
+      txt(W0*0.72+18,ly,sg.label||"","start","#1f2933",12); ly+=20; });
+    el.appendChild(s); return;
+  }
+  // bar / grouped bar
+  const cats=o.categories||[]; const series=o.series||(o.values?[{values:o.values}]:[]);
+  const PADL=44,PADB=cats.some(c=>String(c).length>6)?44:30,PADR=14,PADT=top+(series.length>1?16:6);
+  const plotW=W0-PADL-PADR, plotH=H0-PADT-PADB, y0=PADT+plotH;
+  let ymax=o.ymax; if(ymax==null){ let m=0; series.forEach(se=>se.values.forEach((v,i)=>m=Math.max(m,v+((se.errors&&se.errors[i])||0)))); ymax=m*1.18||1; }
+  const sy=v=>y0-v/ymax*plotH;
+  // y axis + gridlines + ticks
+  const yst=(function(r){const raw=r/5,p=Math.pow(10,Math.floor(Math.log10(raw))),m=raw/p;return (m<1.5?1:m<3?2:m<7?5:10)*p;})(ymax);
+  for(let v=0;v<=ymax+1e-9;v+=yst){ s.appendChild(mk("line",{x1:PADL,y1:sy(v),x2:PADL+plotW,y2:sy(v),stroke:"#e7ebf0","stroke-width":1}));
+    txt(PADL-6,sy(v)+4,(Math.round(v*100)/100),"end","#5b6470",11); }
+  s.appendChild(mk("line",{x1:PADL,y1:PADT,x2:PADL,y2:y0,stroke:"#5b6470","stroke-width":1.5}));
+  s.appendChild(mk("line",{x1:PADL,y1:y0,x2:PADL+plotW,y2:y0,stroke:"#5b6470","stroke-width":1.5}));
+  if(o.ylabel){ const n=mk("text",{x:14,y:PADT+plotH/2,"font-size":12,fill:"#5b6470","text-anchor":"middle","font-family":"system-ui",transform:`rotate(-90 14 ${PADT+plotH/2})`}); n.textContent=o.ylabel; s.appendChild(n); }
+  const gw=plotW/Math.max(1,cats.length), ns2=series.length, bw=gw*0.7/ns2;
+  cats.forEach((cat,i)=>{ const gx=PADL+i*gw+gw*0.15;
+    series.forEach((se,j)=>{ const v=se.values[i]||0, x=gx+j*bw, c=COLORS[se.color]||PAL[j%PAL.length];
+      s.appendChild(mk("rect",{x,y:sy(v),width:bw*0.92,height:y0-sy(v),fill:c,rx:2}));
+      const e=se.errors&&se.errors[i]; if(e){ const cxb=x+bw*0.46; s.appendChild(mk("line",{x1:cxb,y1:sy(v+e),x2:cxb,y2:sy(v-e),stroke:"#1f2933","stroke-width":1.4}));
+        s.appendChild(mk("line",{x1:cxb-4,y1:sy(v+e),x2:cxb+4,y2:sy(v+e),stroke:"#1f2933","stroke-width":1.4})); s.appendChild(mk("line",{x1:cxb-4,y1:sy(v-e),x2:cxb+4,y2:sy(v-e),stroke:"#1f2933","stroke-width":1.4})); } });
+    txt(gx+gw*0.7/2, y0+16, cat, "middle", "#1f2933", 12); });
+  if(ns2>1){ let lx=PADL+8; series.forEach((se,j)=>{ const c=COLORS[se.color]||PAL[j%PAL.length];
+    s.appendChild(mk("rect",{x:lx,y:PADT-12,width:11,height:11,fill:c,rx:2})); txt(lx+15,PADT-2,se.name||("S"+(j+1)),"start","#1f2933",11);
+    lx+=(se.name||"").length*6.5+34; }); }
+  el.appendChild(s);
+}
+
+function drawOn(node, durMs, animate){
+  svg.appendChild(node);
+  if(animate===false || INSTANT){ return node; }
+  node.querySelectorAll("path").forEach(p=>{
+    const st=p.getAttribute("stroke");
+    if(!st || st==="none") return;        // skip fill-only paths
+    let len; try{ len=p.getTotalLength(); }catch(e){ return; }
+    p.style.strokeDasharray=len; p.style.strokeDashoffset=len;
+    p.animate([{strokeDashoffset:len},{strokeDashoffset:0}],
+              {duration:durMs, easing:"ease-in-out", fill:"forwards"});
+  });
+  return node;
+}
+function rcol(cue,def){ return COLORS[(cue.style&&cue.style.color)||def]||COLORS[def]; }
+
+// Re-draw an object's annotations around its current position (used after move/transform/carry).
+function redrawAnns(id){
+  const o = reg[id]; if(!o || !o.anns || !o.anns.length) return;
+  const specs = o.anns; o.anns = [];
+  for(const s of specs){ s.nodes.forEach(n => n.remove()); _redrawOne(s.cue); }
+}
+function _redrawOne(cue){
+  if(cue.action==="callout") drawCallout(cue, false);
+  else if(cue.action==="region") drawRegion(cue, false);
+  else annotate(cue, 0, false);
+}
+const SVGNS="http://www.w3.org/2000/svg";
+function svgCircle(cx,cy,r,fill){ const n=document.createElementNS(SVGNS,"circle");
+  n.setAttribute("cx",cx);n.setAttribute("cy",cy);n.setAttribute("r",r);n.setAttribute("fill",fill); return n; }
+function svgRect(x,y,w,h,fill,stroke){ const n=document.createElementNS(SVGNS,"rect");
+  n.setAttribute("x",x);n.setAttribute("y",y);n.setAttribute("width",w);n.setAttribute("height",h);
+  n.setAttribute("rx",6);n.setAttribute("fill",fill);n.setAttribute("stroke",stroke);n.setAttribute("stroke-width",1.6); return n; }
+// labeled callout with a leader line pointing at a spot on a target (image/figure/object)
+function drawCallout(cue, animate){
+  const bb = bboxOf(cue.target); if(!bb) return;
+  const nx=(cue.spot&&cue.spot[0]!=null)?cue.spot[0]:0.5, ny=(cue.spot&&cue.spot[1]!=null)?cue.spot[1]:0.5;
+  const spot=[bb.x+nx*bb.w, bb.y+ny*bb.h], col=rcol(cue,"ink");
+  const side=cue.side||(nx<0.5?"left":"right");
+  const dir={left:[-1,0],right:[1,0],up:[0,-1],down:[0,1]}[side]||[1,0];
+  const off=64, lab=[spot[0]+dir[0]*off, spot[1]+dir[1]*off];
+  const text=cue.text||cue.label||"", tw=Math.max(34,text.length*7.6+16);
+  const lx=dir[0]<0?lab[0]-tw:lab[0], ly=lab[1]-13;
+  const g=document.createElementNS(SVGNS,"g");
+  g.appendChild(svgCircle(spot[0],spot[1],4,col));
+  g.appendChild(mkLine(SVGNS,spot[0],spot[1], dir[0]<0?lx+tw:lx, ly+13, col,1.6));
+  g.appendChild(svgRect(lx,ly,tw,26,"#ffffff",col));
+  const t=document.createElementNS(SVGNS,"text"); t.setAttribute("x",lx+tw/2); t.setAttribute("y",ly+17);
+  t.setAttribute("font-size",13); t.setAttribute("text-anchor","middle"); t.setAttribute("fill",col);
+  t.setAttribute("font-family","system-ui"); t.textContent=text; g.appendChild(t);
+  svg.appendChild(g);
+  if(animate!==false) g.animate([{opacity:0},{opacity:1}],{duration:300,fill:"backwards"});
+  if(reg[cue.target]) (reg[cue.target].anns=reg[cue.target].anns||[]).push({cue,nodes:[g]});
+}
+// highlight a region (spot) on a target image/figure
+function drawRegion(cue, animate){
+  const bb=bboxOf(cue.target); if(!bb) return;
+  const nx=(cue.spot&&cue.spot[0]!=null)?cue.spot[0]:0.5, ny=(cue.spot&&cue.spot[1]!=null)?cue.spot[1]:0.5;
+  const cx=bb.x+nx*bb.w, cy=bb.y+ny*bb.h, rw=(cue.rw||0.18)*bb.w, rh=(cue.rh||0.18)*bb.h;
+  const before=svg.childElementCount;
+  drawOn(rc.ellipse(cx,cy,rw*2,rh*2,{stroke:rcol(cue,"red"),strokeWidth:2.6,roughness:1.4}), 500, animate);
+  if(reg[cue.target]){ const nodes=Array.from(svg.children).slice(before);
+    (reg[cue.target].anns=reg[cue.target].anns||[]).push({cue,nodes}); }
+}
+
+function annotate(cue, durMs, animate){
+  const tgt = cue.target;
+  const bb = bboxOf(tgt, cue.part);
+  const a = cue.action;
+  const before = svg.childElementCount;
+  if (a==="circle"){
+    if(!bb) return; const pad=14;
+    drawOn(rc.ellipse(bb.x+bb.w/2, bb.y+bb.h/2, bb.w+pad*2.4, bb.h+pad*2.4,
+      {stroke:rcol(cue,"red"),strokeWidth:2.5,roughness:1.6}), durMs, animate);
+  } else if (a==="box"){
+    if(!bb) return; const pad=12;
+    drawOn(rc.rectangle(bb.x-pad, bb.y-pad, bb.w+pad*2, bb.h+pad*2,
+      {stroke:rcol(cue,"blue"),strokeWidth:2.5,roughness:1.4}), durMs, animate);
+  } else if (a==="underline"){
+    if(!bb) return; const y=bb.y+bb.h+10;
+    drawOn(rc.line(bb.x-4, y, bb.x+bb.w+4, y,{stroke:rcol(cue,"ink"),strokeWidth:2.5,roughness:1.4}), durMs, animate);
+  } else if (a==="strike"){
+    if(!bb) return; const y=bb.y+bb.h/2;
+    drawOn(rc.line(bb.x-4, y, bb.x+bb.w+4, y,{stroke:rcol(cue,"red"),strokeWidth:2.5,roughness:1.2}), durMs, animate);
+  } else if (a==="highlight"){
+    if(!bb) return; const pad=8;
+    const g=rc.rectangle(bb.x-pad, bb.y-pad/2, bb.w+pad*2, bb.h+pad,
+      {stroke:"none",fill:rcol(cue,"yellow"),fillStyle:"solid",fillWeight:1});
+    g.style.opacity=0.32; svg.appendChild(g);
+    if(animate!==false && !INSTANT){
+      g.animate([{transform:"scaleX(0)"},{transform:"scaleX(1)"}],
+        {duration:durMs,fill:"backwards",easing:"ease-out"});
+      g.style.transformOrigin=(bb.x-pad)+"px 0"; g.style.transformBox="view-box";
+    }
+  } else if (a==="brace"){
+    if(!bb) return; const y=bb.y+bb.h+8, x0=bb.x, x1=bb.x+bb.w, mid=(x0+x1)/2;
+    const d=`M${x0} ${y} q0 12 ${(mid-x0)/2} 12 q${(mid-x0)/2} 0 ${(mid-x0)/2} 12 q0 -12 ${(x1-mid)/2} -12 q${(x1-mid)/2} 0 ${(x1-mid)/2} -12`;
+    drawOn(rc.path(d,{stroke:rcol(cue,"ink"),strokeWidth:2,roughness:1}), durMs, animate);
+  } else if (a==="arrow"){
+    drawArrow(cue, durMs, animate);
+  } else if (a==="pointer"){
+    if(!bb) return; const g=rc.ellipse(bb.x+bb.w/2,bb.y-18,16,16,{fill:rcol(cue,"orange"),fillStyle:"solid",stroke:"none"});
+    svg.appendChild(g); if(animate!==false && !INSTANT) g.animate([{opacity:0},{opacity:1}],{duration:200,fill:"forwards"});
+  }
+  // attach the created node(s) to the target so they follow it on move/transform/carry
+  if(tgt && reg[tgt]){
+    const nodes = Array.from(svg.children).slice(before);
+    (reg[tgt].anns = reg[tgt].anns || []).push({cue, nodes});
+  }
+}
+
+function resolveAnchor(an){
+  if(!an) return null;
+  if (typeof an.x==="number") return [X(an.x), Y(an.y)];
+  const o=reg[an.ref]; if(!o) return null;
+  const s=an.side||"center";
+  if(s==="top") return [o.cx, o.cy-o.h/2];
+  if(s==="bottom") return [o.cx, o.cy+o.h/2];
+  if(s==="left") return [o.cx-o.w/2, o.cy];
+  if(s==="right") return [o.cx+o.w/2, o.cy];
+  return [o.cx, o.cy];
+}
+function drawArrow(cue, durMs, animate){
+  const p0=resolveAnchor(cue.from_anchor), p1=resolveAnchor(cue.to_anchor);
+  if(!p0||!p1) return; const col=rcol(cue,"ink");
+  const g=document.createElementNS("http://www.w3.org/2000/svg","g");
+  g.appendChild(rc.line(p0[0],p0[1],p1[0],p1[1],{stroke:col,strokeWidth:2.5,roughness:1.2}));
+  const ang=Math.atan2(p1[1]-p0[1],p1[0]-p0[0]), hl=16;
+  g.appendChild(rc.line(p1[0],p1[1],p1[0]-hl*Math.cos(ang-0.4),p1[1]-hl*Math.sin(ang-0.4),{stroke:col,strokeWidth:2.5}));
+  g.appendChild(rc.line(p1[0],p1[1],p1[0]-hl*Math.cos(ang+0.4),p1[1]-hl*Math.sin(ang+0.4),{stroke:col,strokeWidth:2.5}));
+  drawOn(g, durMs, animate);
+  occupy((p0[0]+p1[0])/2, (p0[1]+p1[1])/2,
+         Math.abs(p1[0]-p0[0])+24, Math.abs(p1[1]-p0[1])+24);
+  if (cue.label){ const t=document.createElementNS("http://www.w3.org/2000/svg","text");
+    t.setAttribute("x",(p0[0]+p1[0])/2+8); t.setAttribute("y",(p0[1]+p1[1])/2-8);
+    t.setAttribute("fill",col); t.setAttribute("font-size","22"); t.setAttribute("font-family","Caveat,cursive");
+    t.textContent=cue.label; svg.appendChild(t); if(animate!==false) t.animate([{opacity:0},{opacity:1}],{duration:durMs,fill:"forwards"}); }
+}
+
+// ---------- other actions ----------
+function transform(cue, durMs){
+  const old=reg[cue.target];
+  if(old){ if(INSTANT){ old.el.style.opacity=0; }
+           else { old.el.animate([{opacity:1},{opacity:0}],{duration:durMs/2,fill:"forwards"});
+                  setTimeout(()=>{ old.el.style.opacity=0; }, durMs/2); } }
+  const nc={ id:cue.target+"_t"+Math.random().toString(36).slice(2,6), object:cue.to,
+             pos: old? {x:old.cx/W*100, y:old.cy/H*100}:cue.pos, style:cue.style };
+  const finish=()=>{ const ne=reg[nc.id]; if(!ne) return; delete reg[nc.id];
+    if(old) ne.anns = old.anns;            // carry annotations to the new object
+    if(old && old._pts && ne.graph){       // re-plot live points onto the transformed graph
+      old._pts.forEach(p=>plotPoint(ne.graph, p.gx, p.gy, p.color, p.label)); ne._pts=old._pts; }
+    reg[cue.target]=ne; redrawAnns(cue.target); };
+  if(LAYOUT||INSTANT){ makeObject(nc, durMs); finish(); }     // synchronous for instant replay/prefire
+  else setTimeout(()=>{ makeObject(nc, durMs); finish(); }, durMs/2);
+}
+function pulse(cue){ if(INSTANT)return; const t=reg[cue.target]; if(!t)return;
+  t.el.animate([{transform:"translate(-50%,-50%) scale(1)"},{transform:"translate(-50%,-50%) scale(1.18)"},
+                {transform:"translate(-50%,-50%) scale(1)"}],{duration:700,iterations:2}); }
+function focus(cue){ if(INSTANT)return; Object.entries(reg).forEach(([id,o])=>{ if(id!==cue.target) o.el.style.opacity=0.25; });
+  setTimeout(()=>Object.values(reg).forEach(o=>o.el.style.opacity=1), 1400); }
+function moveObj(cue, durMs){ const t=reg[cue.target]; if(!t||!cue.pos)return;
+  const nx=X(cue.pos.x), ny=Y(cue.pos.y);
+  if(!INSTANT) t.el.animate([{left:t.el.style.left,top:t.el.style.top},{left:nx/W*100+"%",top:ny/H*100+"%"}],
+    {duration:durMs,fill:"forwards",easing:"ease-in-out"});
+  const apply=()=>{t.cx=nx;t.cy=ny;t.el.style.left=nx/W*100+"%";t.el.style.top=ny/H*100+"%";redrawAnns(cue.target);};
+  if(LAYOUT||INSTANT) apply(); else setTimeout(apply,durMs); }
+function eraseObj(cue,durMs){ const t=reg[cue.target]; if(!t)return;
+  (t.anns||[]).forEach(s=>s.nodes.forEach(n=>n.remove()));
+  if(INSTANT){ t.el.remove(); delete reg[cue.target]; return; }
+  t.el.animate([{opacity:1},{opacity:0}],{duration:durMs,fill:"forwards"});
+  setTimeout(()=>{t.el.remove(); delete reg[cue.target];},durMs); }
+
+const SPEED = { slow:1.5, normal:1, fast:0.6 };
+function fireCue(cue){
+  const base = (cue.action==="write"||cue.action==="draw"||cue.action==="plot"||cue.action==="transform")?750:550;
+  const dur = base*(SPEED[cue.speed||"normal"]);
+  switch(cue.action){
+    case "write": case "draw": case "plot": case "graph": case "table": case "figure": case "diagram": case "chart": case "image": makeObject(cue, dur); break;
+    case "transform": transform(cue, dur); break;
+    case "point": { const e=reg[cue.target]; const g=e&&e.graph;
+                    if(g){ plotPoint(g, cue.gx, cue.gy, (cue.style&&cue.style.color), cue.label);
+                      (e._pts=e._pts||[]).push({gx:cue.gx,gy:cue.gy,color:(cue.style&&cue.style.color),label:cue.label}); }
+                    break; }
+    case "callout": drawCallout(cue, true); break;
+    case "region": drawRegion(cue, true); break;
+    case "pulse": pulse(cue); break;
+    case "focus": focus(cue); break;
+    case "move": moveObj(cue, dur); break;
+    case "erase": eraseObj(cue, dur); break;
+    case "clear": (FLOW==="scroll") ? scrollDivider() : newPage(cue.keep||[]); break;
+    default: annotate(cue, dur);
+  }
+}
+
+// ---------- timeline driver ----------
+let beatIdx=-1, fired=[], playing=false, totalDur=0, doneDur=0, beatStartPerf=0;
+function clearBoard(){ mathLayer.innerHTML=""; svg.innerHTML=""; occupied=[]; setScroll(0,false); for(const k in reg) delete reg[k]; }
+
+function setCaption(say){
+  const cap=document.getElementById("caption"); cap.innerHTML="";
+  say.split(/(\s+)/).forEach(tok=>{
+    if(tok==="" ) return;
+    if(/^\s+$/.test(tok)) cap.appendChild(document.createTextNode(tok));
+    else { const s=document.createElement("span"); s.className="w"; s.textContent=tok; cap.appendChild(s); }
+  });
+}
+function startBeat(i){
+  beatIdx=i; fired=[]; beatStartPerf=performance.now();
+  const beat=SCORE.beats[i];
+  setCaption(beat.say);
+  const au=audios[i];
+  if (RECORD){ setTimeout(onEnded, (durations[i]||1)*1000); }
+  else { au.currentTime=0; au.play(); }
+}
+function tick(){
+  if(playing && beatIdx>=0){
+    const beat=SCORE.beats[beatIdx], au=audios[beatIdx], dur=durations[beatIdx]||1;
+    const pos = RECORD ? (performance.now()-beatStartPerf)/1000 : au.currentTime;
+    const marks = (MANIFEST[beatIdx] && MANIFEST[beatIdx].marks) || {};
+    // word-anchored timing (bookmark seconds) with fraction fallback
+    (beat.cues||[]).forEach((c,idx)=>{
+      const fireT = (marks[idx]!==undefined) ? marks[idx] : (c.at*dur);
+      if(!fired[idx] && pos>=fireT){ fired[idx]=true; try{fireCue(c);}catch(e){console.warn(e);} }
+    });
+    // karaoke caption from word-boundary timings
+    const words=(MANIFEST[beatIdx] && MANIFEST[beatIdx].words) || [];
+    if(words.length){
+      let spoken=0; for(const w of words){ if(pos>=w[1]) spoken++; else break; }
+      const spans=document.getElementById("caption").querySelectorAll(".w");
+      for(let k=0;k<spans.length;k++) spans[k].classList.toggle("on", k<spoken);
+    }
+    const elapsed=doneDur+pos;
+    document.getElementById("prog").style.width=(elapsed/totalDur*100)+"%";
+  }
+  requestAnimationFrame(tick);
+}
+function onEnded(){
+  const beat=SCORE.beats[beatIdx];
+  (beat.cues||[]).forEach((c,idx)=>{ if(!fired[idx]){ fired[idx]=true; try{fireCue(c);}catch(e){} } });
+  doneDur+=durations[beatIdx]||0;
+  const hold=(MANIFEST[beatIdx].hold||0)*1000;
+  const endB = SEG ? SEG[1] : SCORE.beats.length;
+  setTimeout(()=>{ if(beatIdx+1<endB) startBeat(beatIdx+1);
+                   else { playing=false; window.__done=true;
+                          document.getElementById("play").textContent="Replay";
+                          document.getElementById("play").disabled=false; } }, hold);
+}
+
+// Instantly build the cumulative board state for beats [0,upto) — no animation, no waiting —
+// so a capture segment can start mid-lecture in exactly the state real-time playback would reach.
+function prefireBeats(upto){
+  INSTANT = true;
+  for(let bi=0; bi<upto; bi++){
+    const cues = SCORE.beats[bi].cues || [];
+    const dur = durations[bi] || 1;
+    const marks = (MANIFEST[bi] && MANIFEST[bi].marks) || {};
+    const fireT = i => (marks[i]!==undefined) ? marks[i] : ((cues[i].at||0)*dur);
+    const order = cues.map((c,i)=>i).sort((a,b)=> fireT(a)-fireT(b));
+    for(const ci of order){ curRef = bi+"."+ci; try{ fireCue(cues[ci]); }catch(e){ console.warn(e); } }
+    doneDur += dur;
+  }
+  try{ document.getAnimations().forEach(a=>a.finish()); }catch(e){}
+  INSTANT = false;
+}
+
+async function load(){
+  document.getElementById("metaLine").textContent =
+    SCORE.meta.title + (SCORE.meta.level? "  ·  "+SCORE.meta.level : "");
+  document.title = SCORE.meta.title;
+  audios = MANIFEST.map(m=>{ const a=new Audio(m.file); a.preload="auto"; return a; });
+  await Promise.all(audios.map((a,i)=>new Promise(res=>{
+    a.addEventListener("loadedmetadata",()=>{ durations[i]=a.duration; res(); },{once:true});
+    a.addEventListener("error",()=>{ durations[i]=3; res(); },{once:true});
+  })));
+  audios.forEach((a,i)=>a.addEventListener("ended", onEnded));
+  totalDur=durations.reduce((s,d)=>s+(d||0),0);
+  const play=document.getElementById("play"); play.disabled=false; play.textContent="▶ Play";
+  requestAnimationFrame(tick);
+  if (AUTOPLAY) start();
+}
+function start(){ if(playing)return;
+  doneDur=0;
+  const s0 = SEG ? SEG[0] : 0;
+  clearBoard();
+  if(SEG && SEG[0]>0) prefireBeats(SEG[0]);
+  const begin = ()=>{ const m=document.getElementById("recmask"); if(m) m.style.display="none";
+    playing=true; window.__started=true;
+    document.getElementById("play").textContent="Playing…"; document.getElementById("play").disabled=true;
+    startBeat(s0); };
+  // In record mode hold a black mask briefly so the recorder has a clean black lead-in to trim.
+  if(RECORD) setTimeout(begin, 500); else begin();
+}
+
+function runLayout(){
+  // replay the whole lecture instantly, recording resolved geometry for the Manim backend
+  durations = MANIFEST.map(m => m.dur || 4);
+  clearBoard(); curPage = 0; layoutOps = [];
+  for(let bi=0; bi<SCORE.beats.length; bi++){
+    const cues = SCORE.beats[bi].cues || [];
+    const dur = durations[bi] || 4;
+    const marks = (MANIFEST[bi] && MANIFEST[bi].marks) || {};
+    const fireT = i => (marks[i]!==undefined) ? marks[i] : ((cues[i].at||0)*dur);
+    const order = cues.map((c,i)=>i).sort((a,b)=> fireT(a)-fireT(b));
+    for(const ci of order){ curRef = bi+"."+ci; try{ fireCue(cues[ci]); }catch(e){ console.warn(e); } }
+  }
+  window.__layout = { flow:FLOW, ops:layoutOps };
+  window.__layoutDone = true;
+}
+
+document.getElementById("play").addEventListener("click", start);
+document.getElementById("restart").addEventListener("click", ()=>{ playing=false; audios.forEach(a=>{a.pause();}); clearBoard();
+  beatIdx=-1; doneDur=0; document.getElementById("prog").style.width="0";
+  document.getElementById("caption").textContent=""; document.getElementById("play").disabled=false;
+  document.getElementById("play").textContent="▶ Play"; });
+
+function boot(){ if(LAYOUT) runLayout(); else load(); }
+window.addEventListener("DOMContentLoaded", ()=>{ if(window.katex) boot(); else window.addEventListener("load", boot); });
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# Core
+requests
+jsonschema
+flask
+# TTS: Azure Speech (default) + OpenAI fallback uses requests
+azure-cognitiveservices-speech
+# Ingestion (vision: PyMuPDF rasterizes PDF pages for gpt-5.4 vision)
+pypdf
+python-docx
+pymupdf
+pillow
+# Web render capture + MP4 export
+playwright==1.58.0
+imageio-ffmpeg
+# (dev/sample generation)
+reportlab

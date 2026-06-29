@@ -1,0 +1,293 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/lecture_score.schema.json",
+  "title": "Lecture Score",
+  "description": "Renderer-agnostic, time-synchronized description of a narrated whiteboard math lecture. The unit of synchronization is the 'beat': a chunk of narration plus the drawing cues that occur while it is spoken. Cue timing uses 'at' = fraction (0..1) of the beat's spoken duration, so the author never predicts wall-clock seconds.",
+  "type": "object",
+  "required": ["meta", "board", "beats"],
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["title"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "topic": { "type": "string" },
+        "level": { "type": "string", "description": "e.g. middle-school, algebra-1, calculus" },
+        "skills": { "type": "array", "items": { "type": "string" }, "description": "subdomain skill packs used" },
+        "voice": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "description": "TTS voice id, e.g. alloy, sage, coral" },
+            "persona": { "type": "string", "description": "global tone instructions for the TTS engine" }
+          }
+        }
+      }
+    },
+    "board": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Normalized 100x100 coordinate space, origin top-left.",
+      "properties": {
+        "width": { "type": "number", "default": 100 },
+        "height": { "type": "number", "default": 100 },
+        "flow": { "type": "string", "enum": ["page", "scroll"], "default": "page",
+                  "description": "How the board handles long content. 'page' wipes to a fresh page on overflow (use `clear`/`keep`). 'scroll' is an endless whiteboard that scrolls down to follow new content; `clear` becomes a section divider." },
+        "theme": { "type": "string", "enum": ["whiteboard", "blackboard", "chalk"], "default": "whiteboard" }
+      }
+    },
+    "beats": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/beat" }
+    }
+  },
+  "definitions": {
+    "beat": {
+      "type": "object",
+      "required": ["id", "say"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "say": {
+          "type": "string",
+          "description": "Narration in plain spoken words. Math is spoken, NOT LaTeX (e.g. 'x squared minus nine')."
+        },
+        "tone": {
+          "type": "string",
+          "description": "Optional per-beat delivery instruction for the TTS engine (e.g. 'curious, slows down on the key idea')."
+        },
+        "hold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 6,
+          "description": "Optional extra seconds of silence to hold on the board after this beat's narration (for the drawing to land)."
+        },
+        "cues": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/cue" },
+          "description": "Drawing actions performed while this beat is spoken."
+        }
+      }
+    },
+    "cue": {
+      "type": "object",
+      "required": ["at", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fallback timing: when in the beat to start, as a fraction of its spoken duration. Always provide this."
+        },
+        "anchor": {
+          "type": "string",
+          "description": "Preferred timing: a word or short phrase copied verbatim from this beat's `say`. The cue fires exactly when that word is spoken (via a TTS bookmark). Falls back to `at` if the word isn't found."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "write", "draw", "plot", "graph", "table", "figure", "diagram", "chart", "image", "transform",
+            "highlight", "circle", "underline", "strike", "box", "brace", "arrow",
+            "callout", "region", "pointer", "pulse", "move", "erase", "focus", "clear", "point"
+          ]
+        },
+        "id": { "type": "string", "description": "Id assigned to the object created by this cue (write/draw/plot)." },
+        "target": { "type": "string", "description": "Id of an existing object this cue acts on." },
+        "keep": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "For action=clear: ids of objects to carry over to the top of the new page (everything else is wiped)."
+        },
+        "part": { "type": "string", "description": "Sub-expression of a math target to act on (substring of its TeX, e.g. '9' or 'x^2')." },
+        "object": { "$ref": "#/definitions/object" },
+        "to": { "$ref": "#/definitions/object", "description": "Target object for a 'transform'." },
+        "from_anchor": { "$ref": "#/definitions/anchor" },
+        "to_anchor": { "$ref": "#/definitions/anchor" },
+        "pos": { "$ref": "#/definitions/pos" },
+        "below": { "type": "string", "description": "Place below this object id." },
+        "right_of": { "type": "string", "description": "Place to the right of this object id." },
+        "label": { "type": "string", "description": "Short label, e.g. on an arrow." },
+        "gx": { "type": "number", "description": "For action=point: data x-coord to plot on the target graph." },
+        "gy": { "type": "number", "description": "For action=point: data y-coord to plot on the target graph." },
+        "spot": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "For callout/region: normalized [x,y] (0..1) location within the target object." },
+        "side": { "type": "string", "enum": ["left", "right", "up", "down"], "description": "For callout: which way the label sits from the spot." },
+        "rw": { "type": "number", "description": "For region: half-width as a fraction of the target." },
+        "rh": { "type": "number", "description": "For region: half-height as a fraction of the target." },
+        "text": { "type": "string", "description": "For callout: the label text." },
+        "style": { "$ref": "#/definitions/style" },
+        "speed": { "type": "string", "enum": ["slow", "normal", "fast"], "default": "normal" }
+      }
+    },
+    "object": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "enum": ["math", "text", "shape", "plot", "graph", "table", "figure", "diagram", "chart", "image"] },
+        "tex": { "type": "string", "description": "LaTeX for type=math." },
+        "text": { "type": "string", "description": "Plain text for type=text." },
+        "headers": { "type": "array", "items": { "type": "string" }, "description": "For type=table: column header cells (rendered as a styled header row). Each may be LaTeX/text." },
+        "rows": {
+          "type": "array",
+          "description": "For type=table: rows of cells (each cell a string; LaTeX or text/number).",
+          "items": { "type": "array", "items": { "type": "string" } }
+        },
+        "fn": { "type": "string", "description": "Single function of x (e.g. 'x^3 - 2'). For one curve." },
+        "domain": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "x-domain [min,max] (alias of xrange)." },
+        "fns": {
+          "type": "array",
+          "description": "For type=graph: one or more curves to draw.",
+          "items": {
+            "type": "object", "required": ["expr"], "additionalProperties": false,
+            "properties": {
+              "expr": { "type": "string", "description": "Function of x, JS math (use ^ or **, and Math fns like sqrt, sin)." },
+              "color": { "type": "string", "enum": ["ink", "red", "blue", "green", "orange", "purple"] }
+            }
+          }
+        },
+        "xrange": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "yrange": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "grid": { "type": "boolean", "default": true, "description": "Show graph-paper grid." },
+        "hlines": {
+          "type": "array", "description": "Dashed horizontal reference lines (e.g. Vmax, ½Vmax, asymptotes).",
+          "items": { "type": "object", "required": ["y"], "additionalProperties": false,
+            "properties": { "y": {"type":"number"}, "label": {"type":"string"},
+              "color": {"type":"string","enum":["ink","red","blue","green","orange","purple"]},
+              "dashed": {"type":"boolean","default":true} } }
+        },
+        "vlines": {
+          "type": "array", "description": "Dashed vertical reference lines (e.g. KM, x markers).",
+          "items": { "type": "object", "required": ["x"], "additionalProperties": false,
+            "properties": { "x": {"type":"number"}, "label": {"type":"string"},
+              "color": {"type":"string","enum":["ink","red","blue","green","orange","purple"]},
+              "dashed": {"type":"boolean","default":true} } }
+        },
+        "connect": { "type": "boolean", "description": "Connect the data `points` with line segments (a data series)." },
+        "lineColor": { "type": "string", "enum": ["ink", "red", "blue", "green", "orange", "purple"] },
+        "kind": { "type": "string", "enum": ["line", "arrow", "rect", "ellipse", "brace", "bar", "pie"], "description": "Shape kind, or for type=chart the chart kind (bar | pie)." },
+        "title": { "type": "string", "description": "For type=chart: chart title." },
+        "categories": { "type": "array", "items": { "type": "string" }, "description": "For type=chart bar: x-axis category labels." },
+        "series": {
+          "type": "array", "description": "For type=chart bar: one or more data series (grouped bars).",
+          "items": { "type": "object", "required": ["values"], "additionalProperties": false,
+            "properties": { "name": {"type":"string"},
+              "values": {"type":"array","items":{"type":"number"}},
+              "errors": {"type":"array","items":{"type":"number"}, "description":"error-bar half-heights"},
+              "color": {"type":"string","enum":["ink","red","blue","green","orange","purple"]} } }
+        },
+        "slices": {
+          "type": "array", "description": "For type=chart pie: slices.",
+          "items": { "type": "object", "required": ["value"], "additionalProperties": false,
+            "properties": { "label": {"type":"string"}, "value": {"type":"number"},
+              "color": {"type":"string","enum":["ink","red","blue","green","orange","purple"]} } }
+        },
+        "ymax": { "type": "number", "description": "For type=chart bar: max of the value axis." },
+        "xlabel": { "type": "string", "default": "x" },
+        "ylabel": { "type": "string", "default": "y" },
+        "points": {
+          "type": "array",
+          "description": "Plotted data points (e.g. from a table).",
+          "items": {
+            "type": "object", "required": ["x", "y"], "additionalProperties": false,
+            "properties": {
+              "x": { "type": "number" }, "y": { "type": "number" },
+              "label": { "type": "string" },
+              "color": { "type": "string", "enum": ["ink", "red", "blue", "green", "orange", "purple"] }
+            }
+          }
+        },
+        "w": { "type": "number", "description": "Graph width in board px (default 400)." },
+        "h": { "type": "number", "description": "Graph height in board px (default 340)." },
+        "src": { "type": "string", "description": "For type=image: image URL or data-URL to display and annotate over." },
+        "prompt": { "type": "string", "description": "For type=image: a generation prompt (the asset stage fills `src`)." },
+        "alt": { "type": "string", "description": "For type=image: placeholder/alt text." },
+        "layout": { "type": "string", "enum": ["free", "cycle", "column"], "description": "For type=diagram: node auto-layout." },
+        "nodes": {
+          "type": "array",
+          "description": "For type=diagram: graph nodes.",
+          "items": {
+            "type": "object", "required": ["id"], "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" }, "text": { "type": "string" },
+              "at": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "node position in 0..100 local coords" },
+              "shape": { "type": "string", "enum": ["box", "ellipse", "circle"] },
+              "color": { "type": "string", "enum": ["ink", "red", "blue", "green", "orange", "purple"] }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "description": "For type=diagram: directed/undirected connectors between node ids.",
+          "items": {
+            "type": "object", "required": ["from", "to"], "additionalProperties": false,
+            "properties": {
+              "from": { "type": "string" }, "to": { "type": "string" },
+              "label": { "type": "string" }, "arrow": { "type": "boolean" },
+              "color": { "type": "string", "enum": ["ink", "red", "blue", "green", "orange", "purple"] }
+            }
+          }
+        },
+        "elements": {
+          "type": "array",
+          "description": "For type=figure: geometry elements drawn in the figure's own coordinate space (uniform scale).",
+          "items": {
+            "type": "object", "required": ["kind"], "additionalProperties": true,
+            "properties": {
+              "kind": { "type": "string", "enum": ["point", "segment", "line", "ray", "polygon", "circle", "arc", "angle", "label"] },
+              "at": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "from": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "to": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "center": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+              "points": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } },
+              "r": { "type": "number" },
+              "start": { "type": "number" }, "end": { "type": "number" },
+              "ticks": { "type": "integer", "description": "equal-length marks on a segment" },
+              "mark": { "type": "string", "enum": ["right", "arc"], "description": "angle mark style" },
+              "label": { "type": "string" },
+              "text": { "type": "string" },
+              "fill": { "type": "boolean" },
+              "color": { "type": "string", "enum": ["ink", "red", "blue", "green", "orange", "purple"] }
+            }
+          }
+        }
+      }
+    },
+    "anchor": {
+      "description": "A point: either explicit coords, or relative to an object id and a side.",
+      "oneOf": [
+        { "$ref": "#/definitions/pos" },
+        {
+          "type": "object",
+          "required": ["ref"],
+          "additionalProperties": false,
+          "properties": {
+            "ref": { "type": "string" },
+            "side": { "type": "string", "enum": ["top", "bottom", "left", "right", "center"], "default": "center" }
+          }
+        }
+      ]
+    },
+    "pos": {
+      "type": "object",
+      "required": ["x", "y"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 100 },
+        "y": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "color": { "type": "string", "enum": ["ink", "red", "blue", "green", "orange", "purple", "yellow"], "default": "ink" },
+        "size": { "type": "string", "enum": ["sm", "md", "lg", "xl"], "default": "md" },
+        "fill": { "type": "boolean", "default": false }
+      }
+    }
+  }
+}

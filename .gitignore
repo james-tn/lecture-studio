@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Generated lectures / jobs / capture artifacts (1GB+; reproducible from source material)
+out/
+tools/node_modules/
+
+# Windows alternate-data-stream junk (NTFS Zone.Identifier / DLP metadata)
+*:Zone.Identifier
+*:sec.endpointdlp
+*:*.endpointdlp
+
+# Local secrets / resource names
+.env
